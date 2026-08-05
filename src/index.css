@@ -1,0 +1,114 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 3.9%;
+    --primary: 240 5.9% 10%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 240 4.8% 95.9%;
+    --secondary-foreground: 240 5.9% 10%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --accent: 240 4.8% 95.9%;
+    --accent-foreground: 240 5.9% 10%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 5.9% 90%;
+    --input: 240 5.9% 90%;
+    --ring: 240 5.9% 10%;
+    --radius: 0.625rem;
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+
+  .dark {
+    --background: 240 10% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 240 10% 3.9%;
+    --card-foreground: 0 0% 98%;
+    --popover: 240 10% 3.9%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 240 5.9% 10%;
+    --secondary: 240 3.7% 15.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%;
+    --accent: 240 3.7% 15.9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 3.7% 15.9%;
+    --input: 240 3.7% 15.9%;
+    --ring: 240 4.9% 83.9%;
+    --sidebar-background: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 224.3 76.3% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+/* ── ContaGamer custom theme ── */
+html { scroll-behavior: smooth; }
+body { background: #0F0F1A; color: #fff; font-family: 'Inter', system-ui, sans-serif; }
+* { scrollbar-width: thin; scrollbar-color: #6C5CE7 #12122A; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: #12122A; }
+*::-webkit-scrollbar-thumb { background: #6C5CE7; border-radius: 4px; }
+
+.glow-primary { box-shadow: 0 0 24px rgba(108,92,231,.45); }
+.glow-cyan { box-shadow: 0 0 18px rgba(0,210,211,.35); }
+.text-gradient { background: linear-gradient(90deg,#6C5CE7,#00D2D3); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.card-hover { transition: transform .3s cubic-bezier(.2,.8,.2,1), box-shadow .3s, border-color .3s; }
+.card-hover:hover { transform: translateY(-6px) scale(1.01); box-shadow: 0 12px 40px rgba(108,92,231,.35); border-color: #6C5CE7; }
+@keyframes fadeUp { from { opacity: 0; transform: translateY(24px);} to { opacity:1; transform: translateY(0);} }
+.fade-up { animation: fadeUp .6s cubic-bezier(.2,.8,.2,1) both; }
+@keyframes fadeIn { from { opacity:0 } to { opacity:1 } }
+.fade-in { animation: fadeIn .4s ease both; }
+@keyframes pulseGlow { 0%,100%{ box-shadow:0 0 12px rgba(255,215,0,.3)} 50%{ box-shadow:0 0 26px rgba(255,215,0,.7)} }
+.badge-anim { animation: pulseGlow 2.2s infinite; }
+@keyframes slideInRight { from { transform: translateX(120%); opacity:0 } to { transform: translateX(0); opacity:1 } }
+@keyframes toastOut { to { transform: translateX(120%); opacity: 0 } }
+.toast-in { animation: slideInRight .45s cubic-bezier(.2,.8,.2,1) both; }
+.toast-out { animation: toastOut .4s ease both; }
+@keyframes spin { to { transform: rotate(360deg) } }
+.spinner { width: 44px; height: 44px; border: 4px solid rgba(108,92,231,.25); border-top-color: #6C5CE7; border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes floaty { 0%,100%{ transform: translateY(0)} 50%{ transform: translateY(-10px)} }
+.floaty { animation: floaty 5s ease-in-out infinite; }
+@keyframes achievement { 0%{ transform: translateY(-140%) scale(.9); opacity:0 } 12%{ transform: translateY(0) scale(1.05); opacity:1 } 18%{ transform: translateY(0) scale(1)} 85%{ opacity:1 } 100%{ transform: translateY(-140%); opacity:0 } }
+.achievement-toast { animation: achievement 4s cubic-bezier(.2,.8,.2,1) both; }
+.modal-backdrop { background: rgba(5,5,15,.75); backdrop-filter: blur(6px); }
+.hero-grid { background-image: linear-gradient(rgba(108,92,231,.08) 1px, transparent 1px), linear-gradient(90deg, rgba(108,92,231,.08) 1px, transparent 1px); background-size: 44px 44px; }
+.badge-tier { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; padding: 2px 8px; border-radius: 999px; display: inline-block; }
+.tier-bronze { background: rgba(205,127,50,.18); color: #e09b5f; border: 1px solid rgba(205,127,50,.5); }
+.tier-prata { background: rgba(192,192,192,.15); color: #d7d7e2; border: 1px solid rgba(192,192,192,.5); }
+.tier-ouro { background: rgba(255,215,0,.15); color: #FFD700; border: 1px solid rgba(255,215,0,.55); }
+.tier-diamante { background: rgba(0,210,211,.15); color: #00D2D3; border: 1px solid rgba(0,210,211,.55); }
+.line-clamp-1 { display:-webkit-box; -webkit-line-clamp:1; -webkit-box-orient:vertical; overflow:hidden; }
+.line-clamp-2 { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+input[type=range] { accent-color: #6C5CE7; }
