@@ -153,7 +153,7 @@ export default function PainelVendedor() {
                 </div>
                 <div className="bg-[#17172B] border border-[#2A2A4A] rounded-2xl p-5">
                   <div className="text-[#9CA3C0] text-xs font-semibold uppercase mb-1">Receita Total</div>
-                  <div className="text-2xl font-black text-white">{fmt(dashboard?.revenue ?? 0)}</div>
+                  <div className="text-2xl font-black text-white">{fmt(dashboard?.receita ?? 0)}</div>
                   <div className="text-[10px] text-[#9CA3C0] mt-1">Vendas líquidas após taxas</div>
                 </div>
                 <div className="bg-[#17172B] border border-[#2A2A4A] rounded-2xl p-5">
@@ -168,11 +168,11 @@ export default function PainelVendedor() {
                 {/* AGENDA DE REPASSES */}
                 <div className="lg:col-span-2 bg-[#17172B] border border-[#2A2A4A] rounded-3xl p-6">
                   <h3 className="text-lg font-bold mb-4">📅 Próximos Repasses</h3>
-                  {dashboard?.pendingReleases?.length === 0 ? (
+                  {dashboard?.pending?.length === 0 ? (
                     <p className="text-sm text-[#9CA3C0] py-4">Nenhum saldo pendente com data de liberação programada.</p>
                   ) : (
                     <div className="divide-y divide-[#2A2A4A]">
-                      {dashboard?.pendingReleases?.map((p: any) => (
+                      {dashboard?.pending?.map((p: any) => (
                         <div key={p.orderId} className="flex justify-between items-center py-3 text-sm">
                           <div>
                             <span className="font-bold text-white">Pedido #GX-{4000 + p.orderId}</span>
@@ -190,7 +190,7 @@ export default function PainelVendedor() {
                   <h3 className="text-lg font-bold mb-3">⚖️ Mediações e Disputas</h3>
                   <div className="bg-[#12122A] border border-[#2A2A4A] rounded-2xl p-4 text-center">
                     <div className="text-3xl mb-2">⚖️</div>
-                    <div className="text-sm font-black text-white">{dashboard?.openDisputes ?? 0} disputas em andamento</div>
+                    <div className="text-sm font-black text-white">{dashboard?.disputes ?? 0} disputas em andamento</div>
                     <p className="text-xs text-[#9CA3C0] mt-2">
                       Caso o comprador abra disputa, responda imediatamente via chat para que a equipe de mediação libere o saldo.
                     </p>

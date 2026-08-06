@@ -38,6 +38,38 @@ export default function Chat() {
 
   const activeThread = threads?.find((t) => t.thread.id === activeThreadId);
 
+  // Delivery Modal State
+  const [deliverModalOpen, setDeliverModalOpen] = useState(false);
+  const [loginInfo, setLoginInfo] = useState("");
+  const [passwordInfo, setPasswordInfo] = useState("");
+  const [extraInfo, setExtraInfo] = useState("");
+
+  const deliverMutation = trpc.orders.deliverAccount.useMutation({
+    onSuccess: () => {
+      showToast("Conta entregue com sucesso!", "success");
+      setDeliverModalOpen(false);
+      setLoginInfo("");
+      setPasswordInfo("");
+      setExtraInfo("");
+      utils.chat.threads.invalidate();
+    },
+    onError: (err) => showToast(err.message, "error"),
+  });
+
+  const handleDeliver = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeThread?.orderId) return;
+    const combinedData = `Login: ${loginInfo}\nSenha: ${passwordInfo}\n${extraInfo ? `Extra: ${extraInfo}` : ""}`;
+    deliverMutation.mutate({ orderId: activeThread.orderId, data: combinedData });
+  };
+
+  // View Credentials State
+  const [viewCredsModalOpen, setViewCredsModalOpen] = useState(false);
+  const { data: creds, isFetching: loadingCreds } = trpc.orders.viewCredentials.useQuery(
+    { orderId: activeThread?.orderId || 0 },
+    { enabled: viewCredsModalOpen && !!activeThread?.orderId, retry: false }
+  );
+
   useEffect(() => {
     // Scroll to bottom on new messages
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -129,6 +161,24 @@ export default function Chat() {
                     <div className="text-xs text-[#9CA3C0]">Anúncio: {activeThread.listingTitle}</div>
                   )}
                 </div>
+                
+                {/* ACTIONS */}
+                {activeThread.orderId && activeThread.orderStatus === "pago" && activeThread.thread.sellerId === me.id && (
+                  <button
+                    onClick={() => setDeliverModalOpen(true)}
+                    className="bg-red-500 hover:bg-red-600 text-white font-bold px-4 py-2 rounded-lg text-xs transition shadow-lg shadow-red-500/20"
+                  >
+                    📦 Entregar Conta
+                  </button>
+                )}
+                {activeThread.orderId && ["entregue", "confirmado", "concluido"].includes(activeThread.orderStatus || "") && (
+                  <button
+                    onClick={() => setViewCredsModalOpen(true)}
+                    className="bg-[#6C5CE7] hover:bg-[#8B7CF0] text-white font-bold px-4 py-2 rounded-lg text-xs transition"
+                  >
+                    🔑 Ver Dados da Conta
+                  </button>
+                )}
               </div>
 
               {/* MENSAGENS */}
@@ -190,6 +240,60 @@ export default function Chat() {
           )}
         </div>
       </div>
+
+      {/* DELIVER MODAL */}
+      {deliverModalOpen && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+          <div className="bg-[#17172B] border border-[#2A2A4A] rounded-3xl p-6 max-w-md w-full relative">
+            <h3 className="text-xl font-black text-white mb-2">Entregar Conta</h3>
+            <p className="text-[#9CA3C0] text-sm mb-6">
+              Preencha os dados abaixo. Eles serão criptografados (AES-256) e armazenados com segurança. NUNCA envie dados pelo chat!
+            </p>
+            <form onSubmit={handleDeliver} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-[#9CA3C0] mb-1">Login / Email da Conta</label>
+                <input type="text" required value={loginInfo} onChange={e => setLoginInfo(e.target.value)} className="w-full bg-[#0F0F1A] border border-[#2A2A4A] rounded-xl px-4 py-3 text-white focus:border-[#6C5CE7] outline-none" />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-[#9CA3C0] mb-1">Senha</label>
+                <input type="text" required value={passwordInfo} onChange={e => setPasswordInfo(e.target.value)} className="w-full bg-[#0F0F1A] border border-[#2A2A4A] rounded-xl px-4 py-3 text-white focus:border-[#6C5CE7] outline-none" />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-[#9CA3C0] mb-1">Dados Extras (Ex: Código 2FA, Email de Recuperação)</label>
+                <textarea rows={3} value={extraInfo} onChange={e => setExtraInfo(e.target.value)} className="w-full bg-[#0F0F1A] border border-[#2A2A4A] rounded-xl px-4 py-3 text-white focus:border-[#6C5CE7] outline-none" />
+              </div>
+              <div className="flex gap-3 pt-2">
+                <button type="button" onClick={() => setDeliverModalOpen(false)} className="flex-1 bg-[#1E1E35] hover:bg-[#2A2A4A] text-white font-bold py-3 rounded-xl transition">Cancelar</button>
+                <button type="submit" disabled={deliverMutation.isPending} className="flex-1 bg-red-500 hover:bg-red-600 text-white font-bold py-3 rounded-xl transition">
+                  {deliverMutation.isPending ? "Criptografando..." : "Entregar de forma segura"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* VIEW CREDS MODAL */}
+      {viewCredsModalOpen && (
+        <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+          <div className="bg-[#17172B] border border-[#2A2A4A] rounded-3xl p-6 max-w-md w-full relative">
+            <h3 className="text-xl font-black text-white mb-2">Dados da Conta</h3>
+            <p className="text-[#9CA3C0] text-sm mb-6">
+              Estes são os dados de acesso fornecidos pelo vendedor. Altere-os imediatamente no jogo para garantir sua posse!
+            </p>
+            {loadingCreds ? (
+              <div className="py-8 text-center text-[#9CA3C0]">Descriptografando dados...</div>
+            ) : (
+              <div className="bg-[#0F0F1A] border border-[#2A2A4A] rounded-xl p-4 whitespace-pre-wrap text-white font-mono text-sm leading-relaxed mb-6 select-all">
+                {creds?.data || "Dados indisponíveis."}
+              </div>
+            )}
+            <button onClick={() => setViewCredsModalOpen(false)} className="w-full bg-[#6C5CE7] hover:bg-[#8B7CF0] text-white font-bold py-3 rounded-xl transition">
+              Fechar
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

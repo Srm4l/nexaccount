@@ -55,7 +55,7 @@ export async function processMpWebhook(paymentId: number) {
     const [order] = await db.select().from(orders).where(eq(orders.id, orderId));
     if (order && order.status === "aguardando") {
       await db.update(orders)
-        .set({ status: "inspecao", stage: 2 })
+        .set({ status: "pago", stage: 2 })
         .where(eq(orders.id, orderId));
         
       await db.insert(notifications).values({

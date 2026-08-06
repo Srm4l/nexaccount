@@ -126,7 +126,7 @@ export const ordersRouter = createRouter({
         if (result.status === "approved") {
           // Pagamento aprovado — mover pedidos para próximo estágio
           for (const o of orderRows) {
-            await db.update(orders).set({ status: "inspecao", stage: 2 }).where(eq(orders.id, o.id));
+            await db.update(orders).set({ status: "pago", stage: 2 }).where(eq(orders.id, o.id));
             await notify(o.sellerId, "💳", `Pagamento via cartão aprovado para o pedido #${o.id}. Libere os dados!`);
           }
           await notify(ctx.user.id, "✅", `Pagamento via cartão aprovado! ${orderRows.length} pedido(s) confirmados.`);
@@ -240,22 +240,109 @@ export const ordersRouter = createRouter({
       return { stage };
     }),
 
+  deliverAccount: authedQuery
+    .input(z.object({ orderId: z.number().int(), data: z.string().min(1) }))
+    .mutation(async ({ ctx, input }) => {
+      const db = getDb();
+      const [o] = await db.select().from(orders).where(eq(orders.id, input.orderId)).limit(1);
+      if (!o || o.sellerId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN" });
+      if (o.status !== "pago") throw new TRPCError({ code: "BAD_REQUEST", message: "Pedido não está pago." });
+      
+      const { encrypt } = await import("./lib/crypto");
+      const encryptedData = encrypt(input.data);
+      
+      await db.insert(orderCredentials).values({
+        orderId: o.id,
+        encryptedData,
+      });
+      
+      const now = new Date();
+      await db.update(orders).set({ status: "entregue", stage: 3, deliveredAt: now }).where(eq(orders.id, o.id));
+      
+      // Inject system message in chat
+      const [thread] = await db.select().from(chatThreads).where(and(eq(chatThreads.buyerId, o.buyerId), eq(chatThreads.sellerId, o.sellerId), eq(chatThreads.listingId, o.listingId))).limit(1);
+      if (thread) {
+        await db.insert(chatMessages).values({
+          threadId: thread.id,
+          senderId: ctx.user.id,
+          body: "[SISTEMA] O vendedor entregou os dados da conta. Por favor, acesse o painel para visualizar e confirmar o recebimento em até 72h.",
+        });
+      }
+      await notify(o.buyerId, "📦", `Conta entregue! O vendedor enviou as credenciais do pedido #GX-${4000 + o.id}.`);
+      return { success: true };
+    }),
+
+  viewCredentials: authedQuery
+    .input(z.object({ orderId: z.number().int() }))
+    .query(async ({ ctx, input }) => {
+      const db = getDb();
+      const [o] = await db.select().from(orders).where(eq(orders.id, input.orderId)).limit(1);
+      if (!o || (o.buyerId !== ctx.user.id && o.sellerId !== ctx.user.id && ctx.user.role !== "admin")) {
+        throw new TRPCError({ code: "FORBIDDEN" });
+      }
+      
+      const [cred] = await db.select().from(orderCredentials).where(eq(orderCredentials.orderId, o.id)).limit(1);
+      if (!cred) throw new TRPCError({ code: "NOT_FOUND", message: "Credenciais não encontradas." });
+      
+      const { decrypt } = await import("./lib/crypto");
+      return { data: decrypt(cred.encryptedData) };
+    }),
+
   confirmReceipt: authedQuery
     .input(z.object({ orderId: z.number().int() }))
     .mutation(async ({ ctx, input }) => {
       const db = getDb();
       const [o] = await db.select().from(orders).where(eq(orders.id, input.orderId)).limit(1);
       if (!o || o.buyerId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN" });
-      if (o.status === "aguardando" && o.stage < 2) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Pagamento ainda não confirmado. Aguarde a confirmação antes de finalizar o pedido." });
+      if (o.status !== "entregue") {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Pedido não está entregue." });
       }
+      
       const now = new Date();
-      await db.update(orders).set({ stage: 4, status: "concluida", completedAt: now }).where(eq(orders.id, o.id));
-      await db.update(users).set({ sellerSales: sql`${users.sellerSales} + 1` }).where(eq(users.id, o.sellerId));
+      // O valor vai para pendingBalance do vendedor (menos a taxa)
+      const sellerNet = Math.round((o.total * (100 - PLATFORM_FEE_PCT)) / 100);
+      
+      await db.update(orders).set({ stage: 4, status: "confirmado", completedAt: now }).where(eq(orders.id, o.id));
+      await db.update(users).set({ 
+        sellerSales: sql`${users.sellerSales} + 1`,
+        pendingBalance: sql`${users.pendingBalance} + ${sellerNet}`
+      }).where(eq(users.id, o.sellerId));
+      
       const unlock = new Date(now.getTime() + PAYOUT_HOLD_DAYS * 24 * 60 * 60 * 1000);
       await notify(o.sellerId, "💸", `Comprador confirmou o recebimento do pedido #GX-${4000 + o.id}! O valor fica disponível para saque em ${PAYOUT_HOLD_DAYS} dias (${unlock.toLocaleDateString("pt-BR")}).`);
       return { success: true };
     }),
+
+  processEscrowReleases: authedQuery.mutation(async ({ ctx }) => {
+    if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
+    const db = getDb();
+    
+    // Find all 'confirmado' orders where completedAt is more than 20 days ago
+    const holdMs = PAYOUT_HOLD_DAYS * 24 * 60 * 60 * 1000;
+    const thresholdDate = new Date(Date.now() - holdMs);
+    
+    const pendingOrders = await db.select().from(orders).where(
+      and(eq(orders.status, "confirmado"), lte(orders.completedAt, thresholdDate))
+    );
+    
+    let processed = 0;
+    for (const o of pendingOrders) {
+      const sellerNet = Math.round((o.total * (100 - PLATFORM_FEE_PCT)) / 100);
+      const now = new Date();
+      
+      await db.transaction(async (tx) => {
+        await tx.update(orders).set({ status: "concluido", fundsReleasedAt: now }).where(eq(orders.id, o.id));
+        await tx.update(users).set({
+          pendingBalance: sql`${users.pendingBalance} - ${sellerNet}`,
+          balance: sql`${users.balance} + ${sellerNet}`,
+        }).where(eq(users.id, o.sellerId));
+      });
+      await notify(o.sellerId, "💰", `O saldo do pedido #GX-${4000 + o.id} foi liberado e está disponível para saque!`);
+      processed++;
+    }
+    
+    return { success: true, processed };
+  }),
 
   openDispute: authedQuery
     .input(z.object({ orderId: z.number().int(), reason: z.string().min(10) }))
@@ -272,22 +359,26 @@ export const ordersRouter = createRouter({
   sellerDashboard: authedQuery.query(async ({ ctx }) => {
     const db = getDb();
     const myListings = await db.select().from(listings).where(eq(listings.sellerId, ctx.user.id));
+    const [me] = await db.select().from(users).where(eq(users.id, ctx.user.id));
+    
     const sales = await db
       .select({ id: orders.id, total: orders.total, createdAt: orders.createdAt, completedAt: orders.completedAt })
       .from(orders)
-      .where(and(eq(orders.sellerId, ctx.user.id), eq(orders.status, "concluida")));
+      .where(and(eq(orders.sellerId, ctx.user.id), inArray(orders.status, ["confirmado", "concluido"])));
+      
     const net = (total: number) => Math.round((total * (100 - PLATFORM_FEE_PCT)) / 100);
     const receita = sales.reduce((s: number, o: any) => s + net(o.total), 0);
-    // Retenção: valor só fica sacável PAYOUT_HOLD_DAYS dias após a conclusão da venda
     const holdMs = PAYOUT_HOLD_DAYS * 24 * 60 * 60 * 1000;
-    const pending = sales
-      .filter((o: any) => !o.completedAt || Date.now() - new Date(o.completedAt).getTime() < holdMs)
-      .map((o: any) => ({
-        orderId: o.id,
-        amount: net(o.total),
-        unlockAt: new Date(new Date(o.completedAt ?? o.createdAt).getTime() + holdMs),
-      }));
-    const pendingBalance = pending.reduce((s: number, p: any) => s + p.amount, 0);
+    
+    const pending = await db.select().from(orders).where(and(eq(orders.sellerId, ctx.user.id), eq(orders.status, "confirmado")));
+    const pendingMapped = pending.map((o: any) => ({
+      orderId: o.id,
+      amount: net(o.total),
+      unlockAt: o.completedAt ? new Date(new Date(o.completedAt).getTime() + holdMs) : null,
+    }));
+    
+    const pendingBalance = me?.pendingBalance || 0;
+    const balance = me?.balance || 0;
     // série dos últimos 30 dias
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
     const recentSales = await db
@@ -307,13 +398,12 @@ export const ordersRouter = createRouter({
       activeListings: myListings.filter((l: any) => l.status === "ativo").length,
       totalListings: myListings.length,
       salesCount: sales.length,
-      revenue: receita,
-      balance: receita - pendingBalance,
+      receita,
+      balance,
       pendingBalance,
-      pendingReleases: pending,
-      payoutHoldDays: PAYOUT_HOLD_DAYS,
-      salesSeries: series,
-      openDisputes: disputes.length,
+      pending: pendingMapped,
+      disputes: disputes.length,
+      salesLast30Days: series,
     };
   }),
 

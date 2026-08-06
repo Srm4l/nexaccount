@@ -19,11 +19,22 @@ export const chatRouter = createRouter({
       const [other] = await db.select({ id: users.id, name: users.name, verified: users.verified }).from(users).where(eq(users.id, otherId)).limit(1);
       const [last] = await db.select().from(chatMessages).where(eq(chatMessages.threadId, t.id)).orderBy(desc(chatMessages.id)).limit(1);
       let listingTitle: string | null = null;
+      let orderId: number | null = null;
+      let orderStatus: string | null = null;
       if (t.listingId) {
         const [l] = await db.select({ title: listings.title }).from(listings).where(eq(listings.id, t.listingId)).limit(1);
         listingTitle = l?.title ?? null;
+        
+        const { orders } = await import("@db/schema");
+        const [o] = await db.select({ id: orders.id, status: orders.status }).from(orders).where(
+          and(eq(orders.listingId, t.listingId), eq(orders.buyerId, t.buyerId), eq(orders.sellerId, t.sellerId))
+        ).orderBy(desc(orders.id)).limit(1);
+        if (o) {
+          orderId = o.id;
+          orderStatus = o.status;
+        }
       }
-      result.push({ thread: t, other, lastMessage: last ?? null, listingTitle });
+      result.push({ thread: t, other, lastMessage: last ?? null, listingTitle, orderId, orderStatus });
     }
     return result;
   }),

@@ -61,6 +61,14 @@ export default function Admin() {
     onError: (err) => showToast(err.message || "Erro ao atualizar anúncio.", "error"),
   });
 
+  const processEscrowMutation = trpc.orders.processEscrowReleases.useMutation({
+    onSuccess: (data) => {
+      showToast(`${data.processed} pedido(s) processado(s) e fundos liberados!`, "success");
+      utils.admin.overview.invalidate();
+    },
+    onError: (err) => showToast(err.message || "Erro ao processar escrow.", "error"),
+  });
+
   const handleResolveDispute = (e: React.FormEvent) => {
     e.preventDefault();
     if (resolveOrderId === null) return;
@@ -176,6 +184,15 @@ export default function Admin() {
               <div className="bg-[#17172B] border border-[#2A2A4A] rounded-2xl p-5">
                 <div className="text-[#9CA3C0] text-xs font-semibold uppercase mb-1">Mediações Ativas</div>
                 <div className="text-2xl font-black text-red-400">{overview?.disputes}</div>
+              </div>
+              <div className="bg-[#17172B] border border-[#2A2A4A] rounded-2xl p-5 col-span-full sm:col-span-2 lg:col-span-1 flex items-center">
+                <button
+                  onClick={() => processEscrowMutation.mutate()}
+                  disabled={processEscrowMutation.isPending}
+                  className="w-full bg-[#00D2D3] hover:bg-[#00b2b3] text-black font-black py-3 px-4 rounded-xl transition text-sm disabled:opacity-50"
+                >
+                  {processEscrowMutation.isPending ? "Processando..." : "Liberar Escrow"}
+                </button>
               </div>
             </div>
           )}

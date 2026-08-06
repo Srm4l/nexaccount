@@ -201,7 +201,7 @@ export default function PainelComprador() {
                     <div className="font-bold text-white text-sm truncate">{p.listing.title}</div>
                     <div className="text-xs text-[#9CA3C0] mt-1 flex flex-wrap items-center gap-2">
                       <span>
-                        Valor total pago: {fmt(p.order.total)} (Preço: {fmt(p.order.price)} + taxas: {fmt(p.order.fee)}
+                        Valor total pago: {fmt(p.order.total)} (Anúncio: {fmt(p.order.price)}
                         {p.order.hasInsurance ? ` + seguro: ${fmt(p.order.insurancePrice)}` : ""})
                       </span>
                       {p.order.hasInsurance && (
@@ -258,7 +258,7 @@ export default function PainelComprador() {
                     >
                       💬 Conversar
                     </Link>
-                    {p.order.status !== "disputa" && (
+                    {p.order.status === "entregue" && (
                       <>
                         <button
                           onClick={() => {

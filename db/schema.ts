@@ -38,6 +38,8 @@ export const users = sqliteTable("users", {
     .default("basico")
     .notNull(),
   memberSince: integer("memberSince").default(2026).notNull(),
+  balance: integer("balance").default(0).notNull(),
+  pendingBalance: integer("pendingBalance").default(0).notNull(),
   createdAt: tsDefaultNow("createdAt"),
   updatedAt: tsUpdated("updatedAt"),
   lastSignInAt: tsDefaultNow("lastSignInAt"),
@@ -98,14 +100,16 @@ export const orders = sqliteTable(
     price: integer("price").notNull(),
     fee: integer("fee").notNull(),
     total: integer("total").notNull(),
-    stage: integer("stage").default(1).notNull(), // 1 pago, 2 aguardando, 3 inspeção, 4 concluído
-    status: text("status", { enum: ["aguardando", "inspecao", "concluida", "disputa", "cancelada"] })
+    stage: integer("stage").default(1).notNull(), 
+    status: text("status", { enum: ["aguardando", "pago", "entregue", "confirmado", "concluido", "disputa", "cancelada", "reembolsado"] })
       .default("aguardando")
       .notNull(),
     hasInsurance: bool("hasInsurance").default(false).notNull(),
     insurancePrice: integer("insurancePrice").default(0).notNull(),
     disputeReason: text("disputeReason"),
+    deliveredAt: ts("deliveredAt"),
     completedAt: ts("completedAt"),
+    fundsReleasedAt: ts("fundsReleasedAt"),
     createdAt: tsDefaultNow("createdAt"),
     updatedAt: tsUpdated("updatedAt"),
   },
@@ -114,6 +118,25 @@ export const orders = sqliteTable(
     index("orders_seller_idx").on(t.sellerId),
   ],
 );
+
+export const orderCredentials = sqliteTable("order_credentials", {
+  id: id(),
+  orderId: refId("orderId").unique(),
+  encryptedData: text("encryptedData").notNull(),
+  createdAt: tsDefaultNow("createdAt"),
+});
+
+export const withdrawals = sqliteTable("withdrawals", {
+  id: id(),
+  userId: refId("userId"),
+  amount: integer("amount").notNull(),
+  method: text("method").notNull(), // pix, ted, payoneer, crypto
+  status: text("status", { enum: ["pendente", "processando", "concluido", "recusado"] }).default("pendente").notNull(),
+  destinationDetails: text("destinationDetails").notNull(),
+  processedAt: ts("processedAt"),
+  createdAt: tsDefaultNow("createdAt"),
+  updatedAt: tsUpdated("updatedAt"),
+});
 
 export const offers = sqliteTable("offers", {
   id: id(),
@@ -196,3 +219,5 @@ export type ChatMessage = typeof chatMessages.$inferSelect;
 export type Notification = typeof notifications.$inferSelect;
 export type Review = typeof reviews.$inferSelect;
 export type Favorite = typeof favorites.$inferSelect;
+export type OrderCredentials = typeof orderCredentials.$inferSelect;
+export type Withdrawal = typeof withdrawals.$inferSelect;
