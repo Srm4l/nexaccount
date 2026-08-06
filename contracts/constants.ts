@@ -58,6 +58,19 @@ export const ESCROW_STEPS = [
   "✅ Concluído",
 ] as const;
 
+export function isOrderPaid(order: { status: string; stage: number }): boolean {
+  return order.status === "inspecao" || order.status === "concluida" || order.status === "disputa" || order.stage >= 2;
+}
+
+export function orderStatusInfo(order: { status: string; stage: number }) {
+  if (order.status === "concluida") return { label: "Concluída", chip: "bg-green-500/10 text-green-400 border border-green-500/30" };
+  if (order.status === "disputa") return { label: "Em Disputa", chip: "bg-red-500/10 text-red-400 border border-red-500/30" };
+  if (order.status === "cancelada") return { label: "Cancelada", chip: "bg-gray-500/10 text-gray-400 border border-gray-500/30" };
+  if (!isOrderPaid(order)) return { label: "Aguardando Pagamento", chip: "bg-amber-500/10 text-amber-400 border border-amber-500/30" };
+  const label = order.stage >= 3 ? "Em Inspeção" : order.stage === 2 ? "Aguardando Entrega" : "Pagamento Confirmado";
+  return { label, chip: "bg-blue-500/10 text-blue-400 border border-blue-500/30" };
+}
+
 export const PLATFORM_FEE_PCT = 8;
 
 /** Dias de retenção do valor da venda antes de liberar o saque ao vendedor */

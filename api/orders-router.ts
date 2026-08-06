@@ -53,9 +53,9 @@ export const ordersRouter = createRouter({
         created.push(id);
         grandTotal += total;
         const deliveryText = l.deliveryTime ? `entregue em até ${l.deliveryTime}` : "entregue em até 24h";
-        await notify(l.sellerId, "💰", `Nova venda! "${l.title.slice(0, 60)}" — ${deliveryText}.`);
+        await notify(l.sellerId, "💰", `Novo pedido "${l.title.slice(0, 60)}" aguardando pagamento — ${deliveryText}.`);
       }
-      await notify(ctx.user.id, "✅", `Compra confirmada! ${created.length} pedido(s) criado(s), total ${grandTotal.toLocaleString("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 })}.`);
+      await notify(ctx.user.id, "🛒", `Pedido criado! ${created.length} pedido(s), total ${grandTotal.toLocaleString("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 })}. Aguardando pagamento.`);
       
       if (input.paymentMethod === "pix") {
         // Gerar pagamento PIX via Mercado Pago
@@ -157,6 +157,35 @@ export const ordersRouter = createRouter({
       }
     }),
 
+  generatePix: authedQuery
+    .input(z.object({ orderId: z.number().int() }))
+    .mutation(async ({ ctx, input }) => {
+      const db = getDb();
+      const [order] = await db.select().from(orders).where(and(eq(orders.id, input.orderId), eq(orders.buyerId, ctx.user.id)));
+      if (!order) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Pedido não encontrado." });
+      }
+      if (order.status !== "aguardando") {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Pedido não está aguardando pagamento." });
+      }
+
+      try {
+        const pixData = await createPixPayment(
+          order.id,
+          `Pagamento do pedido #${order.id} na ContaGamer`,
+          order.total,
+          ctx.user.email || ""
+        );
+        return { pixData };
+      } catch (err: any) {
+        console.error("Erro ao gerar novo PIX:", err);
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message: "Erro ao gerar PIX.",
+        });
+      }
+    }),
+
   myPurchases: authedQuery.query(async ({ ctx }) => {
     const db = getDb();
     return db
@@ -195,6 +224,11 @@ export const ordersRouter = createRouter({
       
       // Apenas o VENDEDOR pode avançar o status (ex: enviar as credenciais)
       if (!o || o.sellerId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN" });
+
+      // Só é possível avançar após o pagamento ser confirmado
+      if (o.status === "aguardando" && o.stage < 2) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Aguarde a confirmação do pagamento do comprador." });
+      }
       
       // Vendedor só pode avançar até o estágio 3 ("Em inspeção").
       // O estágio 4 ("Concluído") é reservado exclusivamente para o confirmReceipt do comprador.
@@ -212,6 +246,9 @@ export const ordersRouter = createRouter({
       const db = getDb();
       const [o] = await db.select().from(orders).where(eq(orders.id, input.orderId)).limit(1);
       if (!o || o.buyerId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN" });
+      if (o.status === "aguardando" && o.stage < 2) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Pagamento ainda não confirmado. Aguarde a confirmação antes de finalizar o pedido." });
+      }
       const now = new Date();
       await db.update(orders).set({ stage: 4, status: "concluida", completedAt: now }).where(eq(orders.id, o.id));
       await db.update(users).set({ sellerSales: sql`${users.sellerSales} + 1` }).where(eq(users.id, o.sellerId));

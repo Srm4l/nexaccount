@@ -1,8 +1,11 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Link } from "react-router";
 import { trpc } from "../providers/trpc";
-import { GAMES, ESCROW_STEPS } from "../../contracts/constants";
+import { GAMES, ESCROW_STEPS, isOrderPaid, orderStatusInfo } from "../../contracts/constants";
 import { showToast } from "../components/gx/ui";
+import { initMercadoPago, CardPayment } from "@mercadopago/sdk-react";
+
+let mpInitDone = false;
 
 export default function PainelComprador() {
   const utils = trpc.useUtils();
@@ -16,6 +19,85 @@ export default function PainelComprador() {
 
   const [disputeOrderId, setDisputeOrderId] = useState<number | null>(null);
   const [disputeReason, setDisputeReason] = useState("");
+
+  // Payment states
+  const [paymentModalOpen, setPaymentModalOpen] = useState(false);
+  const [paymentTab, setPaymentTab] = useState<"pix" | "card">("pix");
+  const [pixData, setPixData] = useState<{ qrCodeBase64: string; qrCodeCopiaECola: string; paymentId: number } | null>(null);
+  const [orderToPay, setOrderToPay] = useState<any>(null);
+  const [cardProcessing, setCardProcessing] = useState(false);
+  const [mpReady, setMpReady] = useState(false);
+
+  // Initialize Mercado Pago SDK
+  useEffect(() => {
+    if (mpInitDone) { setMpReady(true); return; }
+    fetch("/api/config/mp")
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.publicKey) {
+          initMercadoPago(data.publicKey, { locale: "pt-BR" });
+          mpInitDone = true;
+          setMpReady(true);
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const generatePixMutation = trpc.orders.generatePix.useMutation({
+    onSuccess: (data) => {
+      setPixData(data.pixData);
+    },
+    onError: (err) => {
+      showToast(err.message || "Erro ao gerar PIX.", "error");
+    }
+  });
+
+  const payWithCardMutation = trpc.orders.payWithCard.useMutation({
+    onSuccess: (data) => {
+      setCardProcessing(false);
+      setPaymentModalOpen(false);
+      setOrderToPay(null);
+      if (data.status === "approved") {
+        showToast("Pagamento aprovado! 💳", "success");
+        utils.orders.myPurchases.invalidate();
+      } else if (data.status === "in_process") {
+        showToast("Pagamento em análise. Você será notificado. ⏳", "info");
+        utils.orders.myPurchases.invalidate();
+      }
+    },
+    onError: (err) => {
+      setCardProcessing(false);
+      showToast(err.message || "Erro no pagamento com cartão.", "error");
+    },
+  });
+
+  const handlePayClick = (order: any) => {
+    setOrderToPay(order);
+    setPaymentModalOpen(true);
+    setPaymentTab("pix");
+    setPixData(null);
+  };
+
+  const handlePayWithPix = () => {
+    if (orderToPay) {
+      generatePixMutation.mutate({ orderId: orderToPay.id });
+    }
+  };
+
+  const handleCardFormSubmit = async (formData: any) => {
+    if (!orderToPay) return;
+    setCardProcessing(true);
+    payWithCardMutation.mutate({
+      orderIds: [orderToPay.id],
+      token: formData.token,
+      paymentMethodId: formData.payment_method_id,
+      installments: formData.installments || 1,
+      issuerId: formData.issuer_id || "",
+      payerEmail: formData.payer?.email || me?.email || "",
+      payerIdentificationType: formData.payer?.identification?.type,
+      payerIdentificationNumber: formData.payer?.identification?.number,
+    });
+  };
 
   const confirmReceiptMutation = trpc.orders.confirmReceipt.useMutation({
     onSuccess: () => {
@@ -94,6 +176,8 @@ export default function PainelComprador() {
         <div className="space-y-6">
           {purchases?.map((p: any) => {
             const game = GAMES.find((g) => g.id === p.listing.gameId) || GAMES[0];
+            const paid = isOrderPaid(p.order);
+            const statusInfo = orderStatusInfo(p.order);
             return (
               <div key={p.order.id} className="bg-[#17172B] border border-[#2A2A4A] rounded-2xl p-5 space-y-4">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-[#2A2A4A]">
@@ -103,18 +187,8 @@ export default function PainelComprador() {
                   </div>
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-[#9CA3C0]">Status:</span>
-                    <span
-                      className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                        p.order.status === "concluida"
-                          ? "bg-green-500/10 text-green-400 border border-green-500/30"
-                          : p.order.status === "disputa"
-                          ? "bg-red-500/10 text-red-400 border border-red-500/30"
-                          : p.order.status === "cancelada"
-                          ? "bg-gray-500/10 text-gray-400 border border-gray-500/30"
-                          : "bg-blue-500/10 text-blue-400 border border-blue-500/30"
-                      }`}
-                    >
-                      {p.order.status}
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${statusInfo.chip}`}>
+                      {statusInfo.label}
                     </span>
                   </div>
                 </div>
@@ -145,7 +219,7 @@ export default function PainelComprador() {
                   <div className="grid grid-cols-4 gap-1.5 text-[10px] sm:text-xs text-center font-bold">
                     {ESCROW_STEPS.map((step, idx) => {
                       const num = idx + 1;
-                      const active = p.order.stage >= num;
+                      const active = paid && p.order.stage >= num;
                       return (
                         <div
                           key={idx}
@@ -160,10 +234,23 @@ export default function PainelComprador() {
                       );
                     })}
                   </div>
+                  {!paid && p.order.status === "aguardando" && (
+                    <div className="flex flex-col gap-3 sm:flex-row items-center justify-between text-[11px] text-amber-300/90 bg-amber-500/10 border border-amber-500/30 rounded-lg px-4 py-3">
+                      <div>
+                        ⏳ O pagamento ainda não foi confirmado. Finalize o pagamento para que o vendedor libere a conta.
+                      </div>
+                      <button
+                        onClick={() => handlePayClick(p.order)}
+                        className="bg-amber-500 hover:bg-amber-400 text-black font-black px-4 py-2 rounded-lg transition whitespace-nowrap"
+                      >
+                        💳 Pagar Agora
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 {/* AÇÕES DE SUPORTE E ENTREGA */}
-                {p.order.status !== "concluida" && p.order.status !== "cancelada" && (
+                {paid && p.order.status !== "concluida" && p.order.status !== "cancelada" && (
                   <div className="flex flex-wrap gap-2 justify-end pt-2 border-t border-[#2A2A4A]/50">
                     <Link
                       to="/chat"
@@ -237,6 +324,136 @@ export default function PainelComprador() {
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* MODAL DE SELEÇÃO DE PAGAMENTO */}
+      {paymentModalOpen && !pixData && orderToPay && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md p-8 bg-[#17172B] border border-[#2A2A4A] rounded-3xl relative">
+            <button
+              type="button"
+              onClick={() => { setPaymentModalOpen(false); setOrderToPay(null); }}
+              className="absolute top-4 right-4 text-[#9CA3C0] hover:text-white"
+            >
+              ✕
+            </button>
+            <h3 className="text-xl font-black mb-2 text-white text-center">Forma de Pagamento</h3>
+            <p className="text-xs text-[#9CA3C0] mb-6 text-center">Total: <span className="text-[#00D2D3] font-bold text-base">{fmt(orderToPay.total)}</span></p>
+
+            {/* TABS */}
+            <div className="flex gap-2 mb-6">
+              <button
+                onClick={() => setPaymentTab("pix")}
+                className={`flex-1 py-3 rounded-xl font-bold text-sm transition flex items-center justify-center gap-2 ${
+                  paymentTab === "pix"
+                    ? "bg-[#00D2D3] text-black"
+                    : "bg-[#1E1E35] text-[#9CA3C0] hover:text-white border border-[#2A2A4A]"
+                }`}
+              >
+                <span className="text-lg">📱</span> PIX
+              </button>
+              <button
+                onClick={() => setPaymentTab("card")}
+                className={`flex-1 py-3 rounded-xl font-bold text-sm transition flex items-center justify-center gap-2 ${
+                  paymentTab === "card"
+                    ? "bg-[#6C5CE7] text-white"
+                    : "bg-[#1E1E35] text-[#9CA3C0] hover:text-white border border-[#2A2A4A]"
+                }`}
+              >
+                <span className="text-lg">💳</span> Cartão
+              </button>
+            </div>
+
+            {/* PIX TAB */}
+            {paymentTab === "pix" && (
+              <div className="text-center">
+                <p className="text-sm text-[#9CA3C0] mb-4">Pague instantaneamente via PIX. O QR Code será gerado automaticamente.</p>
+                <button
+                  onClick={handlePayWithPix}
+                  disabled={generatePixMutation.isPending}
+                  className="w-full bg-[#00D2D3] hover:bg-[#00b2b3] text-black font-black py-3.5 rounded-xl transition flex items-center justify-center disabled:opacity-50"
+                >
+                  {generatePixMutation.isPending ? "Gerando PIX..." : "📱 Pagar com PIX"}
+                </button>
+              </div>
+            )}
+
+            {/* CARD TAB */}
+            {paymentTab === "card" && (
+              <div>
+                {mpReady ? (
+                  <div className="mp-card-form">
+                    <CardPayment
+                      initialization={{ amount: orderToPay.total }}
+                      onSubmit={handleCardFormSubmit}
+                      customization={{
+                        visual: {
+                          style: { theme: "dark" as any },
+                        },
+                        paymentMethods: {
+                          maxInstallments: 12,
+                        },
+                      }}
+                    />
+                    {cardProcessing && (
+                      <div className="mt-4 text-center text-[#9CA3C0] text-sm animate-pulse">
+                        Processando pagamento...
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-[#9CA3C0] text-sm text-center">Carregando formulário de pagamento...</p>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* MODAL QR CODE PIX */}
+      {pixData && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4">
+          <div className="w-full max-w-sm p-8 bg-[#17172B] border border-[#2A2A4A] rounded-3xl relative text-center">
+            <button
+              type="button"
+              onClick={() => { setPixData(null); setPaymentModalOpen(false); setOrderToPay(null); }}
+              className="absolute top-4 right-4 text-[#9CA3C0] hover:text-white"
+            >
+              ✕
+            </button>
+            <h3 className="text-xl font-black mb-2 text-white">Pagamento via PIX</h3>
+            <p className="text-xs text-[#9CA3C0] mb-6">Escaneie o QR Code abaixo no app do seu banco para pagar.</p>
+            
+            <div className="bg-white p-4 rounded-2xl inline-block mb-4 shadow-lg shadow-[#00D2D3]/20">
+              <img 
+                src={`data:image/jpeg;base64,${pixData.qrCodeBase64}`} 
+                alt="QR Code PIX" 
+                className="w-48 h-48"
+              />
+            </div>
+
+            <div className="mb-6">
+              <p className="text-[11px] text-[#9CA3C0] mb-2 uppercase font-bold tracking-wider">Ou copie o código</p>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(pixData.qrCodeCopiaECola);
+                  showToast("Código PIX copiado!", "success");
+                }}
+                className="w-full bg-[#1E1E35] border border-[#2A2A4A] hover:border-[#6C5CE7] text-white text-xs font-mono py-3 px-4 rounded-xl transition flex items-center justify-between"
+              >
+                <span className="truncate mr-2 text-[#9CA3C0]">{pixData.qrCodeCopiaECola.slice(0, 25)}...</span>
+                <span className="text-[#6C5CE7] font-bold">COPIAR</span>
+              </button>
+            </div>
+            
+            <button
+              onClick={() => { setPixData(null); setPaymentModalOpen(false); setOrderToPay(null); utils.orders.myPurchases.invalidate(); }}
+              className="w-full bg-[#00D2D3] hover:bg-[#00b2b3] text-black font-black py-3.5 rounded-xl transition flex items-center justify-center"
+            >
+              Concluir
+            </button>
+          </div>
         </div>
       )}
     </div>

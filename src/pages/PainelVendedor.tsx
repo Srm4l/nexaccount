@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router";
 import { trpc } from "../providers/trpc";
-import { GAMES, ESCROW_STEPS } from "../../contracts/constants";
+import { GAMES, ESCROW_STEPS, isOrderPaid, orderStatusInfo } from "../../contracts/constants";
 import { showToast } from "../components/gx/ui";
 
 export default function PainelVendedor() {
@@ -297,6 +297,8 @@ export default function PainelVendedor() {
             <div className="space-y-4">
               {sales?.map((s: any) => {
                 const game = GAMES.find((g) => g.id === s.listing.gameId) || GAMES[0];
+                const paid = isOrderPaid(s.order);
+                const statusInfo = orderStatusInfo(s.order);
                 return (
                   <div key={s.order.id} className="bg-[#12122A] border border-[#2A2A4A] rounded-2xl p-5 space-y-4">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-[#2A2A4A]">
@@ -306,18 +308,8 @@ export default function PainelVendedor() {
                       </div>
                       <div className="flex items-center gap-2">
                         <span className="text-xs text-[#9CA3C0]">Status da transação:</span>
-                        <span
-                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
-                            s.order.status === "concluida"
-                              ? "bg-green-500/10 text-green-400 border border-green-500/30"
-                              : s.order.status === "disputa"
-                              ? "bg-red-500/10 text-red-400 border border-red-500/30"
-                              : s.order.status === "cancelada"
-                              ? "bg-gray-500/10 text-gray-400 border border-gray-500/30"
-                              : "bg-blue-500/10 text-blue-400 border border-blue-500/30"
-                          }`}
-                        >
-                          {s.order.status}
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${statusInfo.chip}`}>
+                          {statusInfo.label}
                         </span>
                       </div>
                     </div>
@@ -338,7 +330,7 @@ export default function PainelVendedor() {
                       <div className="grid grid-cols-4 gap-1.5 text-[10px] sm:text-xs text-center font-bold">
                         {ESCROW_STEPS.map((step, idx) => {
                           const num = idx + 1;
-                          const active = s.order.stage >= num;
+                          const active = paid && s.order.stage >= num;
                           return (
                             <div
                               key={idx}
@@ -353,10 +345,15 @@ export default function PainelVendedor() {
                           );
                         })}
                       </div>
+                      {!paid && (
+                        <div className="text-[11px] text-amber-300/90 bg-amber-500/10 border border-amber-500/30 rounded-lg px-3 py-2">
+                          ⏳ Pagamento ainda não confirmado. Você será notificado assim que o comprador pagar.
+                        </div>
+                      )}
                     </div>
 
-                    {/* BOTÕES DE CONTROLE DA ENTREGA (DEMO) */}
-                    {s.order.status === "aguardando" && s.order.stage < 3 && (
+                    {/* BOTÕES DE CONTROLE DA ENTREGA */}
+                    {paid && s.order.stage < 3 && s.order.status !== "disputa" && (
                       <div className="flex gap-2 justify-end pt-2">
                         <button
                           onClick={() => handleAdvance(s.order.id)}
