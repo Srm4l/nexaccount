@@ -110,8 +110,9 @@ export const ordersRouter = createRouter({
 
       try {
         const { createCardPayment } = await import("./mercadopago");
+        const orderId = input.orderIds[0];
         const result = await createCardPayment(
-          input.orderIds[0],
+          orderId,
           `Compra de ${input.orderIds.length} conta(s) na ContaGamer`,
           grandTotal,
           input.token,
@@ -122,6 +123,8 @@ export const ordersRouter = createRouter({
           input.payerIdentificationType,
           input.payerIdentificationNumber,
         );
+        
+        await db.update(orders).set({ mpPaymentId: result.paymentId }).where(eq(orders.id, orderId));
 
         if (result.status === "approved") {
           // Pagamento aprovado — mover pedidos para próximo estágio
@@ -176,6 +179,9 @@ export const ordersRouter = createRouter({
           order.total,
           ctx.user.email || ""
         );
+        
+        await db.update(orders).set({ mpPaymentId: pixData.paymentId }).where(eq(orders.id, order.id));
+        
         return { pixData };
       } catch (err: any) {
         console.error("Erro ao gerar novo PIX:", err);
@@ -188,6 +194,22 @@ export const ordersRouter = createRouter({
 
   myPurchases: authedQuery.query(async ({ ctx }) => {
     const db = getDb();
+    
+    // 1. Check for pending payments and poll MercadoPago as a fallback (good for local dev without webhooks)
+    const pendingOrders = await db.select().from(orders).where(and(eq(orders.buyerId, ctx.user.id), eq(orders.status, "aguardando")));
+    if (pendingOrders.length > 0) {
+      const { processMpWebhook } = await import("./mercadopago");
+      for (const po of pendingOrders) {
+        if (po.mpPaymentId) {
+          try {
+            await processMpWebhook(po.mpPaymentId);
+          } catch (e) {
+            console.error("Erro ao fazer poll no Mercado Pago para webhook ausente:", e);
+          }
+        }
+      }
+    }
+
     return db
       .select({
         order: orders,

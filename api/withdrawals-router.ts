@@ -2,9 +2,12 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { eq, desc } from "drizzle-orm";
 import { getDb } from "./queries/connection";
-import { users, withdrawals } from "@db/schema";
+import { users, withdrawals, notifications } from "@db/schema";
 import { createRouter, authedQuery } from "./middleware";
-import { notify } from "./queries/notifications";
+
+async function notify(userId: number, icon: string, text: string) {
+  await getDb().insert(notifications).values({ userId, icon, text });
+}
 
 export const withdrawalsRouter = createRouter({
   requestWithdrawal: authedQuery

@@ -408,6 +408,8 @@ export default function PainelVendedor() {
             </div>
           )}
         </div>
+      )}
+      
       {/* CONTEÚDO DA ABA 4: SAQUES */}
       {activeTab === "saques" && (
         <div className="space-y-6">

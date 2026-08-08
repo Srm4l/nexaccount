@@ -107,6 +107,7 @@ export const orders = sqliteTable(
     hasInsurance: bool("hasInsurance").default(false).notNull(),
     insurancePrice: integer("insurancePrice").default(0).notNull(),
     disputeReason: text("disputeReason"),
+    mpPaymentId: integer("mpPaymentId"),
     deliveredAt: ts("deliveredAt"),
     completedAt: ts("completedAt"),
     fundsReleasedAt: ts("fundsReleasedAt"),
