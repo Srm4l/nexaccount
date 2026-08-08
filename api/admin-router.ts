@@ -3,7 +3,7 @@ import { TRPCError } from "@trpc/server";
 import { asc, desc, eq, sql } from "drizzle-orm";
 import { createRouter, adminQuery, publicQuery } from "./middleware";
 import { getDb } from "./queries/connection";
-import { games, listings, notifications, orders, users } from "@db/schema";
+import { games, listings, notifications, orders, users, withdrawals } from "@db/schema";
 
 async function notify(userId: number, icon: string, text: string) {
   await getDb().insert(notifications).values({ userId, icon, text });
@@ -160,6 +160,57 @@ export const adminRouter = createRouter({
     .mutation(async ({ input }) => {
       const db = getDb();
       await db.update(listings).set({ status: input.status }).where(eq(listings.id, input.id));
+      return { success: true };
+    }),
+
+  allWithdrawals: adminQuery.query(async () => {
+    const db = getDb();
+    return db
+      .select({
+        withdrawal: withdrawals,
+        sellerName: users.name,
+        sellerEmail: users.email,
+        sellerPix: users.pixKey,
+      })
+      .from(withdrawals)
+      .innerJoin(users, eq(withdrawals.userId, users.id))
+      .orderBy(desc(withdrawals.id))
+      .limit(100);
+  }),
+
+  processWithdrawal: adminQuery
+    .input(
+      z.object({
+        id: z.number().int(),
+        action: z.enum(["approve", "reject"]),
+        note: z.string().optional(),
+      })
+    )
+    .mutation(async ({ input }) => {
+      const db = getDb();
+      const [withdrawal] = await db.select().from(withdrawals).where(eq(withdrawals.id, input.id)).limit(1);
+      
+      if (!withdrawal) throw new TRPCError({ code: "NOT_FOUND" });
+      if (withdrawal.status !== "pendente" && withdrawal.status !== "processando") {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Este saque já foi processado." });
+      }
+
+      const noteStr = input.note ? ` Nota: ${input.note}` : "";
+
+      if (input.action === "reject") {
+        await db.transaction(async (tx) => {
+          await tx.update(withdrawals).set({ status: "recusado", processedAt: new Date() }).where(eq(withdrawals.id, withdrawal.id));
+          
+          // Estornar valor
+          const [user] = await tx.select().from(users).where(eq(users.id, withdrawal.userId)).limit(1);
+          await tx.update(users).set({ balance: user.balance + withdrawal.amount }).where(eq(users.id, withdrawal.userId));
+        });
+        await notify(withdrawal.userId, "❌", `Seu saque de ${(withdrawal.amount / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL'})} foi recusado e estornado para seu saldo.${noteStr}`);
+      } else {
+        await db.update(withdrawals).set({ status: "concluido", processedAt: new Date() }).where(eq(withdrawals.id, withdrawal.id));
+        await notify(withdrawal.userId, "💸", `Seu saque de ${(withdrawal.amount / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL'})} foi pago com sucesso! Verifique sua conta.${noteStr}`);
+      }
+
       return { success: true };
     }),
 });

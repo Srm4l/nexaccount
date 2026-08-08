@@ -20,6 +20,47 @@ import * as crypto from "node:crypto";
 import { serveStatic } from "@hono/node-server/serve-static";
 try { mkdirSync("./uploads", { recursive: true }); } catch {}
 
+// ── Garante que um admin com senha conhecida sempre exista ──
+async function ensureAdmin() {
+  try {
+    const { getDb } = await import("./queries/connection");
+    const { users } = await import("@db/schema");
+    const { eq } = await import("drizzle-orm");
+    const db = getDb();
+
+    const ADMIN_EMAIL = "admin@contagamer.gg";
+    const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Admin@2026";
+
+    const salt = crypto.randomBytes(16).toString("hex");
+    const hash = crypto.scryptSync(ADMIN_PASSWORD, salt, 64).toString("hex");
+    const passwordHash = `${salt}:${hash}`;
+
+    const [existing] = await db.select().from(users).where(eq(users.email, ADMIN_EMAIL)).limit(1);
+
+    if (existing) {
+      // Reseta a senha do admin a cada boot para nunca travar
+      await db.update(users).set({ passwordHash, role: "admin" }).where(eq(users.id, existing.id));
+      console.log(`✅ Admin atualizado: ${ADMIN_EMAIL} / ${ADMIN_PASSWORD}`);
+    } else {
+      await db.insert(users).values({
+        unionId: `cred:${ADMIN_EMAIL}`,
+        name: "Admin GX",
+        email: ADMIN_EMAIL,
+        passwordHash,
+        role: "admin",
+        verified: true,
+        verificationLevel: "premium",
+        sellerTier: "diamante",
+        memberSince: new Date().getFullYear(),
+      });
+      console.log(`✅ Admin criado: ${ADMIN_EMAIL} / ${ADMIN_PASSWORD}`);
+    }
+  } catch (err) {
+    console.error("⚠️ Erro ao garantir admin:", err);
+  }
+}
+ensureAdmin();
+
 // Servir os arquivos de upload publicamente
 app.use("/uploads/*", serveStatic({ root: "./" }));
 

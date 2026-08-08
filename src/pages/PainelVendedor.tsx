@@ -5,7 +5,10 @@ import { GAMES, ESCROW_STEPS, isOrderPaid, orderStatusInfo } from "../../contrac
 import { showToast } from "../components/gx/ui";
 
 export default function PainelVendedor() {
-  const [activeTab, setActiveTab] = useState<"dashboard" | "anuncios" | "vendas">("dashboard");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "anuncios" | "vendas" | "saques">("dashboard");
+  const [withdrawAmount, setWithdrawAmount] = useState("");
+  const [withdrawMethod, setWithdrawMethod] = useState<"pix" | "ted" | "payoneer" | "crypto">("pix");
+  const [withdrawDetails, setWithdrawDetails] = useState("");
   const utils = trpc.useUtils();
 
   const { data: me } = trpc.auth.me.useQuery(undefined, { retry: false });
@@ -23,6 +26,23 @@ export default function PainelVendedor() {
   // Query user's sales (orders where they are the seller)
   const { data: sales, isLoading: loadingSales } = trpc.orders.mySales.useQuery(undefined, {
     enabled: !!me,
+  });
+
+  // Query user's withdrawals
+  const { data: withdrawalsList, isLoading: loadingWithdrawals } = trpc.withdrawals.myWithdrawals.useQuery(undefined, {
+    enabled: !!me,
+  });
+
+  const requestWithdrawalMutation = trpc.withdrawals.requestWithdrawal.useMutation({
+    onSuccess: () => {
+      showToast("Solicitação de saque enviada com sucesso!", "success");
+      utils.withdrawals.myWithdrawals.invalidate();
+      utils.orders.sellerDashboard.invalidate();
+      setWithdrawAmount("");
+      setWithdrawMethod("pix");
+      setWithdrawDetails("");
+    },
+    onError: (err) => showToast(err.message || "Erro ao solicitar saque.", "error"),
   });
 
   // Toggle listing status (active/paused)
@@ -68,6 +88,17 @@ export default function PainelVendedor() {
 
   const handleAdvance = (orderId: number) => {
     advanceMutation.mutate({ orderId });
+  };
+
+  const handleRequestWithdrawal = (e: React.FormEvent) => {
+    e.preventDefault();
+    const amount = Number(withdrawAmount) * 100;
+    if (amount <= 0) return showToast("Valor inválido", "error");
+    requestWithdrawalMutation.mutate({
+      amount,
+      method: withdrawMethod,
+      destinationDetails: withdrawDetails
+    });
   };
 
   const fmt = (n: number) =>
@@ -129,6 +160,14 @@ export default function PainelVendedor() {
           }`}
         >
           Minhas Vendas ({sales?.length ?? 0})
+        </button>
+        <button
+          onClick={() => setActiveTab("saques")}
+          className={`pb-3 px-4 font-bold text-sm transition ${
+            activeTab === "saques" ? "text-[#6C5CE7] border-b-2 border-[#6C5CE7]" : "text-[#9CA3C0] hover:text-white"
+          }`}
+        >
+          Financeiro e Saques
         </button>
       </div>
 
@@ -368,6 +407,121 @@ export default function PainelVendedor() {
               })}
             </div>
           )}
+        </div>
+      {/* CONTEÚDO DA ABA 4: SAQUES */}
+      {activeTab === "saques" && (
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/* Resumo de Saldos */}
+            <div className="bg-[#17172B] border border-[#2A2A4A] rounded-3xl p-6 flex flex-col justify-center">
+              <h2 className="text-xl font-bold mb-4">Saldos</h2>
+              <div className="space-y-4">
+                <div className="bg-[#12122A] rounded-2xl p-4 border border-[#00D2D3]/30">
+                  <div className="text-sm text-[#9CA3C0] uppercase font-bold mb-1">Disponível para Saque</div>
+                  <div className="text-3xl font-black text-[#00D2D3]">{fmt(dashboard?.balance ?? 0)}</div>
+                </div>
+                <div className="bg-[#12122A] rounded-2xl p-4 border border-[#2A2A4A]">
+                  <div className="text-sm text-[#9CA3C0] uppercase font-bold mb-1">Retido (Escrow de 20 dias)</div>
+                  <div className="text-xl font-bold text-white">{fmt(dashboard?.pendingBalance ?? 0)}</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Formulário de Saque */}
+            <div className="bg-[#17172B] border border-[#2A2A4A] rounded-3xl p-6">
+              <h2 className="text-xl font-bold mb-4">Solicitar Saque</h2>
+              <form onSubmit={handleRequestWithdrawal} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-bold text-[#9CA3C0] mb-2">Método de Saque</label>
+                  <select 
+                    value={withdrawMethod}
+                    onChange={(e) => setWithdrawMethod(e.target.value as any)}
+                    className="w-full bg-[#12122A] border border-[#2A2A4A] text-white rounded-xl px-4 py-3 focus:outline-none focus:border-[#6C5CE7]"
+                  >
+                    <option value="pix">PIX</option>
+                    <option value="ted">Transferência Bancária (TED)</option>
+                    <option value="payoneer">Payoneer</option>
+                    <option value="crypto">Criptomoedas (USDT)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-bold text-[#9CA3C0] mb-2">Detalhes (Chave PIX / Carteira)</label>
+                  <input
+                    type="text"
+                    required
+                    value={withdrawDetails}
+                    onChange={(e) => setWithdrawDetails(e.target.value)}
+                    placeholder={withdrawMethod === "pix" ? "Sua chave PIX (CPF, Email, Celular)" : "Dados bancários completos"}
+                    className="w-full bg-[#12122A] border border-[#2A2A4A] text-white rounded-xl px-4 py-3 focus:outline-none focus:border-[#6C5CE7]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-bold text-[#9CA3C0] mb-2">Valor (R$)</label>
+                  <input
+                    type="number"
+                    min="1"
+                    step="0.01"
+                    required
+                    value={withdrawAmount}
+                    onChange={(e) => setWithdrawAmount(e.target.value)}
+                    placeholder="Ex: 50.00"
+                    className="w-full bg-[#12122A] border border-[#2A2A4A] text-white rounded-xl px-4 py-3 focus:outline-none focus:border-[#6C5CE7]"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={requestWithdrawalMutation.isPending || (dashboard?.balance ?? 0) <= 0}
+                  className="w-full bg-[#6C5CE7] hover:bg-[#8B7CF0] text-white font-black py-3 px-4 rounded-xl transition disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {requestWithdrawalMutation.isPending ? "Solicitando..." : "Confirmar Solicitação"}
+                </button>
+              </form>
+            </div>
+          </div>
+
+          {/* Histórico */}
+          <div className="bg-[#17172B] border border-[#2A2A4A] rounded-3xl p-6">
+            <h2 className="text-xl font-bold mb-4">Histórico de Saques</h2>
+            {loadingWithdrawals ? (
+              <div className="text-center py-8">Carregando histórico...</div>
+            ) : withdrawalsList?.length === 0 ? (
+              <p className="text-[#9CA3C0] text-sm py-4 text-center">Nenhum saque solicitado até o momento.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm whitespace-nowrap">
+                  <thead>
+                    <tr className="border-b border-[#2A2A4A] text-[#9CA3C0]">
+                      <th className="pb-3 font-semibold">Data</th>
+                      <th className="pb-3 font-semibold">Método</th>
+                      <th className="pb-3 font-semibold">Valor</th>
+                      <th className="pb-3 font-semibold">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {withdrawalsList?.map((w: any) => (
+                      <tr key={w.id} className="border-b border-[#2A2A4A]/50">
+                        <td className="py-4 text-white">
+                          {new Date(w.createdAt).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                        </td>
+                        <td className="py-4 text-white uppercase">{w.method}</td>
+                        <td className="py-4 font-bold text-white">{fmt(w.amount)}</td>
+                        <td className="py-4">
+                          <span className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider ${
+                            w.status === "pendente" ? "bg-amber-500/10 text-amber-400 border border-amber-500/30" :
+                            w.status === "processando" ? "bg-blue-500/10 text-blue-400 border border-blue-500/30" :
+                            w.status === "concluido" ? "bg-green-500/10 text-green-400 border border-green-500/30" :
+                            "bg-red-500/10 text-red-400 border border-red-500/30"
+                          }`}>
+                            {w.status}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>

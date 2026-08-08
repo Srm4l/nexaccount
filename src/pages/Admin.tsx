@@ -6,7 +6,7 @@ import { showToast } from "../components/gx/ui";
 export default function Admin() {
   const utils = trpc.useUtils();
 
-  const [activeTab, setActiveTab] = useState<"overview" | "disputas" | "usuarios" | "anuncios">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "disputas" | "usuarios" | "anuncios" | "saques">("overview");
 
   const { data: me, isLoading: loadingMe } = trpc.auth.me.useQuery(undefined, { retry: false });
 
@@ -25,6 +25,25 @@ export default function Admin() {
 
   const { data: listingsList, isLoading: loadingListings } = trpc.admin.allListings.useQuery(undefined, {
     enabled: me?.role === "admin",
+  });
+
+  const { data: withdrawalsList, isLoading: loadingWithdrawals } = trpc.admin.allWithdrawals.useQuery(undefined, {
+    enabled: me?.role === "admin",
+  });
+
+  // Withdrawals resolution
+  const [resolveWithdrawalId, setResolveWithdrawalId] = useState<number | null>(null);
+  const [resolveWithdrawalAction, setResolveWithdrawalAction] = useState<"approve" | "reject">("approve");
+  const [resolveWithdrawalNote, setResolveWithdrawalNote] = useState("");
+
+  const processWithdrawalMutation = trpc.admin.processWithdrawal.useMutation({
+    onSuccess: () => {
+      showToast("Saque processado com sucesso!", "success");
+      setResolveWithdrawalId(null);
+      setResolveWithdrawalNote("");
+      utils.admin.allWithdrawals.invalidate();
+    },
+    onError: (err) => showToast(err.message || "Erro ao processar saque.", "error"),
   });
 
   // Dispute resolution states
@@ -76,6 +95,16 @@ export default function Admin() {
       orderId: resolveOrderId,
       action: resolveAction,
       note: resolveNote || undefined,
+    });
+  };
+
+  const handleResolveWithdrawal = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (resolveWithdrawalId === null) return;
+    processWithdrawalMutation.mutate({
+      id: resolveWithdrawalId,
+      action: resolveWithdrawalAction,
+      note: resolveWithdrawalNote || undefined,
     });
   };
 
@@ -155,6 +184,14 @@ export default function Admin() {
           }`}
         >
           Anúncios ({listingsList?.length ?? 0})
+        </button>
+        <button
+          onClick={() => setActiveTab("saques")}
+          className={`pb-3 px-4 font-bold text-sm transition ${
+            activeTab === "saques" ? "text-[#6C5CE7] border-b-2 border-[#6C5CE7]" : "text-[#9CA3C0] hover:text-white"
+          }`}
+        >
+          Saques ({withdrawalsList?.filter(w => w.withdrawal.status === "pendente").length ?? 0})
         </button>
       </div>
 
@@ -347,7 +384,84 @@ export default function Admin() {
         </div>
       )}
 
-      {/* DIALOG DE RESOLUÇÃO */}
+      {/* 5. SAQUES */}
+      {activeTab === "saques" && (
+        <div className="bg-[#17172B] border border-[#2A2A4A] rounded-3xl p-6">
+          <h3 className="text-lg font-bold mb-4">Solicitações de Saque</h3>
+          {loadingWithdrawals ? (
+            <div>Carregando saques...</div>
+          ) : withdrawalsList?.length === 0 ? (
+            <p className="text-[#9CA3C0] text-sm text-center">Nenhuma solicitação de saque no momento.</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm whitespace-nowrap">
+                <thead>
+                  <tr className="border-b border-[#2A2A4A] text-[#9CA3C0]">
+                    <th className="pb-3 font-semibold">Vendedor</th>
+                    <th className="pb-3 font-semibold">Valor</th>
+                    <th className="pb-3 font-semibold">Método / Chave</th>
+                    <th className="pb-3 font-semibold">Status</th>
+                    <th className="pb-3 font-semibold text-right">Ação</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {withdrawalsList?.map((w: any) => (
+                    <tr key={w.withdrawal.id} className="border-b border-[#2A2A4A]/50">
+                      <td className="py-4">
+                        <div className="text-white font-bold">{w.sellerName}</div>
+                        <div className="text-xs text-[#9CA3C0]">{w.sellerEmail}</div>
+                      </td>
+                      <td className="py-4 font-black text-[#00D2D3]">{fmt(w.withdrawal.amount)}</td>
+                      <td className="py-4">
+                        <div className="uppercase text-xs font-bold text-white bg-[#12122A] px-2 py-1 rounded inline-block mb-1">{w.withdrawal.method}</div>
+                        <div className="text-[#9CA3C0] text-xs">{w.withdrawal.destinationDetails}</div>
+                      </td>
+                      <td className="py-4">
+                        <span className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                          w.withdrawal.status === "pendente" ? "bg-amber-500/10 text-amber-400 border border-amber-500/30" :
+                          w.withdrawal.status === "processando" ? "bg-blue-500/10 text-blue-400 border border-blue-500/30" :
+                          w.withdrawal.status === "concluido" ? "bg-green-500/10 text-green-400 border border-green-500/30" :
+                          "bg-red-500/10 text-red-400 border border-red-500/30"
+                        }`}>
+                          {w.withdrawal.status}
+                        </span>
+                      </td>
+                      <td className="py-4 text-right">
+                        {(w.withdrawal.status === "pendente" || w.withdrawal.status === "processando") && (
+                          <div className="flex gap-2 justify-end">
+                            <button
+                              onClick={() => {
+                                setResolveWithdrawalId(w.withdrawal.id);
+                                setResolveWithdrawalAction("approve");
+                                setResolveWithdrawalNote("");
+                              }}
+                              className="bg-green-600 hover:bg-green-700 text-white font-bold text-xs px-3 py-1.5 rounded transition"
+                            >
+                              Marcar Pago
+                            </button>
+                            <button
+                              onClick={() => {
+                                setResolveWithdrawalId(w.withdrawal.id);
+                                setResolveWithdrawalAction("reject");
+                                setResolveWithdrawalNote("");
+                              }}
+                              className="bg-red-500 hover:bg-red-600 text-white font-bold text-xs px-3 py-1.5 rounded transition"
+                            >
+                              Recusar
+                            </button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* DIALOG DE RESOLUÇÃO DE DISPUTAS */}
       {resolveOrderId !== null && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
           <form onSubmit={handleResolveDispute} className="w-full max-w-md p-8 bg-[#17172B] border border-[#2A2A4A] rounded-2xl relative">
@@ -382,6 +496,47 @@ export default function Admin() {
                 className="w-full bg-[#6C5CE7] hover:bg-[#8B7CF0] text-white font-black py-3.5 rounded-xl transition disabled:opacity-50"
               >
                 {resolveDisputeMutation.isPending ? "Processando..." : "Confirmar Julgamento"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* DIALOG DE RESOLUÇÃO DE SAQUES */}
+      {resolveWithdrawalId !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm">
+          <form onSubmit={handleResolveWithdrawal} className="w-full max-w-md p-8 bg-[#17172B] border border-[#2A2A4A] rounded-2xl relative">
+            <button
+              type="button"
+              onClick={() => setResolveWithdrawalId(null)}
+              className="absolute top-4 right-4 text-[#9CA3C0] hover:text-white"
+            >
+              ✕
+            </button>
+            <h3 className="text-lg font-bold mb-4 text-white">Processar Saque</h3>
+            <p className="text-xs text-[#9CA3C0] mb-4">
+              Você está marcando este saque como:{" "}
+              <strong className="text-white">{resolveWithdrawalAction === "approve" ? "Pago (Concluído)" : "Recusado (Estornado)"}</strong>.
+            </p>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-[#9CA3C0] uppercase mb-1">Comprovante / Motivo (Opcional)</label>
+                <textarea
+                  value={resolveWithdrawalNote}
+                  onChange={(e) => setResolveWithdrawalNote(e.target.value)}
+                  placeholder={resolveWithdrawalAction === "approve" ? "Link do comprovante ou ID da transação PIX..." : "Motivo da recusa..."}
+                  rows={3}
+                  className="w-full bg-[#12122A] border border-[#2A2A4A] rounded-xl px-4 py-3 text-sm text-white outline-none focus:border-[#6C5CE7]"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={processWithdrawalMutation.isPending}
+                className="w-full bg-[#6C5CE7] hover:bg-[#8B7CF0] text-white font-black py-3.5 rounded-xl transition disabled:opacity-50"
+              >
+                {processWithdrawalMutation.isPending ? "Processando..." : "Confirmar Ação"}
               </button>
             </div>
           </form>
