@@ -3,12 +3,43 @@ import { TRPCError } from "@trpc/server";
 import { and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import { createRouter, authedQuery } from "./middleware";
 import { getDb } from "./queries/connection";
-import { listings, orders, users, notifications, favorites } from "@db/schema";
+import { runEscrowReleaseJob } from "./jobs/escrow";
+import { listings, orders, users, notifications, favorites, orderCredentials, chatThreads, chatMessages, transactions } from "@db/schema";
 import { PLATFORM_FEE_PCT, PAYOUT_HOLD_DAYS } from "@contracts/constants";
 import { createPixPayment } from "./mercadopago";
+import { checkRateLimit } from "./lib/rate-limit";
 
 async function notify(userId: number, icon: string, text: string) {
   await getDb().insert(notifications).values({ userId, icon, text });
+}
+
+const ORDER_STATUSES_BLOCKING_LISTING: Array<"aguardando" | "pago" | "entregue" | "confirmado" | "concluido" | "disputa"> = [
+  "aguardando",
+  "pago",
+  "entregue",
+  "confirmado",
+  "concluido",
+  "disputa",
+];
+
+async function reopenListingsWithoutActiveOrders(db: ReturnType<typeof getDb>, listingIds: number[]) {
+  if (listingIds.length === 0) return;
+  const uniqueListingIds = Array.from(new Set(listingIds));
+  const blockers = await db
+    .select({ listingId: orders.listingId })
+    .from(orders)
+    .where(
+      and(
+        inArray(orders.listingId, uniqueListingIds),
+        inArray(orders.status, ORDER_STATUSES_BLOCKING_LISTING),
+      ),
+    );
+
+  const blocked = new Set<number>(blockers.map((row: any) => row.listingId));
+  const reopenIds = uniqueListingIds.filter((id) => !blocked.has(id));
+  if (reopenIds.length > 0) {
+    await db.update(listings).set({ status: "ativo" }).where(inArray(listings.id, reopenIds));
+  }
 }
 
 export const ordersRouter = createRouter({
@@ -21,20 +52,53 @@ export const ordersRouter = createRouter({
       }),
     )
     .mutation(async ({ ctx, input }) => {
+      await checkRateLimit(String(ctx.user.id), { limit: 10, windowMs: 60_000, keyPrefix: "mutation:checkout" });
       const db = getDb();
       const rows = await db.select().from(listings).where(inArray(listings.id, input.listingIds));
-      const active = rows.filter((l: any) => l.status === "ativo" && l.sellerId !== ctx.user.id);
+      const busy = await db
+        .select({ listingId: orders.listingId })
+        .from(orders)
+        .where(and(inArray(orders.listingId, input.listingIds), inArray(orders.status, ORDER_STATUSES_BLOCKING_LISTING)));
+      const busyIds = new Set<number>(busy.map((row: any) => row.listingId));
+      const active = rows.filter((l: any) => l.status === "ativo" && l.sellerId !== ctx.user.id && !busyIds.has(l.id));
       if (active.length === 0) {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Nenhum anúncio disponível para compra." });
       }
       const created: number[] = [];
       let grandTotal = 0;
       const insuredIds = input.insuranceListings || [];
+      // Taxa da plataforma por nível do vendedor (fidelidade: tier alto = taxa menor)
+      const TIER_FEE: Record<string, number> = {
+        bronze: 8,
+        prata: 7,
+        ouro: 6,
+        diamante: 5,
+      };
+      // Buscar o sellerTier dos vendedores envolvidos
+      const sellerIds = Array.from(new Set(active.map((l: any) => l.sellerId)));
+      const sellerTiers = new Map<number, number>();
+      if (sellerIds.length) {
+        const sellerRows = await db
+          .select({ id: users.id, sellerTier: users.sellerTier })
+          .from(users)
+          .where(inArray(users.id, sellerIds));
+        for (const s of sellerRows) sellerTiers.set(s.id, TIER_FEE[s.sellerTier as string] ?? PLATFORM_FEE_PCT);
+      }
       for (const l of active) {
-        const fee = Math.round((l.price * PLATFORM_FEE_PCT) / 100);
+        // Claim the listing atomically before creating the order. This prevents
+        // two concurrent checkouts from reserving the same account.
+        const claimed = await db
+          .update(listings)
+          .set({ status: "pausado" })
+          .where(and(eq(listings.id, l.id), eq(listings.status, "ativo")));
+        if (!claimed.changes) continue;
+
+        const feePct = sellerTiers.get(l.sellerId) ?? PLATFORM_FEE_PCT;
+        const fee = Math.round((l.price * feePct) / 100);
         const hasInsurance = insuredIds.includes(l.id);
         const insurancePrice = hasInsurance ? Math.round(l.price * 0.1) : 0;
-        const total = l.price + fee + insurancePrice;
+        // A taxa é do vendedor: não entra no total cobrado do comprador.
+        const total = l.price + insurancePrice;
         const [{ id }] = await db
           .insert(orders)
           .values({
@@ -55,6 +119,9 @@ export const ordersRouter = createRouter({
         const deliveryText = l.deliveryTime ? `entregue em até ${l.deliveryTime}` : "entregue em até 24h";
         await notify(l.sellerId, "💰", `Novo pedido "${l.title.slice(0, 60)}" aguardando pagamento — ${deliveryText}.`);
       }
+      if (created.length === 0) {
+        throw new TRPCError({ code: "CONFLICT", message: "Os anúncios selecionados acabaram de ser reservados por outro comprador." });
+      }
       await notify(ctx.user.id, "🛒", `Pedido criado! ${created.length} pedido(s), total ${grandTotal.toLocaleString("pt-BR", { style: "currency", currency: "BRL", maximumFractionDigits: 0 })}. Aguardando pagamento.`);
       
       if (input.paymentMethod === "pix") {
@@ -63,20 +130,24 @@ export const ordersRouter = createRouter({
         try {
           pixData = await createPixPayment(
             created[0],
-            `Compra de ${created.length} conta(s) na ContaGamer`,
+            `Compra de ${created.length} conta(s) na NEXACCOUNT`,
             grandTotal,
             ctx.user.email || ""
           );
         } catch (err: any) {
           console.error("Erro MP PIX:", err);
-          for (const orderId of created) {
-            await db.delete(orders).where(eq(orders.id, orderId));
-          }
+          await db.update(orders).set({ status: "cancelada" }).where(inArray(orders.id, created));
+          await reopenListingsWithoutActiveOrders(db, active.map((l: any) => l.id));
           throw new TRPCError({
             code: "INTERNAL_SERVER_ERROR",
             message: "Erro ao gerar pagamento PIX. Verifique se sua conta Mercado Pago tem uma chave PIX cadastrada.",
           });
         }
+        // Associar todos os pedidos ao mesmo pagamento agrupador permite que
+        // o webhook atualize o checkout inteiro.
+        await db.update(orders)
+          .set({ mpPaymentId: Number(pixData.paymentId) })
+          .where(inArray(orders.id, created));
         return { orderIds: created, grandTotal, pixData, cardResult: null };
       }
 
@@ -98,22 +169,23 @@ export const ordersRouter = createRouter({
       }),
     )
     .mutation(async ({ ctx, input }) => {
+      await checkRateLimit(String(ctx.user.id), { limit: 10, windowMs: 60_000, keyPrefix: "mutation:payment-card" });
       const db = getDb();
       // Buscar os pedidos do usuário
       const orderRows = await db.select().from(orders).where(
-        and(eq(orders.buyerId, ctx.user.id), inArray(orders.id, input.orderIds))
+        and(eq(orders.buyerId, ctx.user.id), inArray(orders.id, input.orderIds), eq(orders.status, "aguardando"))
       );
-      if (orderRows.length === 0) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Pedidos não encontrados." });
+      if (orderRows.length !== input.orderIds.length) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Alguns pedidos não estão mais disponíveis para pagamento." });
       }
       const grandTotal = orderRows.reduce((sum: number, o: any) => sum + o.total, 0);
 
       try {
         const { createCardPayment } = await import("./mercadopago");
-        const orderId = input.orderIds[0];
+        const orderId = orderRows[0].id;
         const result = await createCardPayment(
           orderId,
-          `Compra de ${input.orderIds.length} conta(s) na ContaGamer`,
+          `Compra de ${input.orderIds.length} conta(s) na NEXACCOUNT`,
           grandTotal,
           input.token,
           input.paymentMethodId,
@@ -124,22 +196,26 @@ export const ordersRouter = createRouter({
           input.payerIdentificationNumber,
         );
         
-        await db.update(orders).set({ mpPaymentId: result.paymentId }).where(eq(orders.id, orderId));
+        // O cartão também pode pagar vários pedidos em uma única transação.
+        await db.update(orders)
+          .set({ mpPaymentId: Number(result.paymentId) })
+          .where(and(inArray(orders.id, orderRows.map((o: any) => o.id)), eq(orders.status, "aguardando")));
 
         if (result.status === "approved") {
           // Pagamento aprovado — mover pedidos para próximo estágio
+          const listingIds: number[] = [];
           for (const o of orderRows) {
-            await db.update(orders).set({ status: "pago", stage: 2 }).where(eq(orders.id, o.id));
+            await db.update(orders).set({ status: "pago", stage: 2 }).where(and(eq(orders.id, o.id), eq(orders.status, "aguardando")));
+            listingIds.push(o.listingId);
             await notify(o.sellerId, "💳", `Pagamento via cartão aprovado para o pedido #${o.id}. Libere os dados!`);
           }
+          await db.update(listings).set({ status: "vendido" }).where(inArray(listings.id, Array.from(new Set(listingIds))));
           await notify(ctx.user.id, "✅", `Pagamento via cartão aprovado! ${orderRows.length} pedido(s) confirmados.`);
         } else if (result.status === "in_process") {
           await notify(ctx.user.id, "⏳", `Pagamento via cartão em análise. Você será notificado quando aprovado.`);
         } else {
-          // rejected — reverter pedidos
-          for (const orderId of input.orderIds) {
-            await db.delete(orders).where(eq(orders.id, orderId));
-          }
+          await db.update(orders).set({ status: "cancelada" }).where(and(inArray(orders.id, orderRows.map((o: any) => o.id)), eq(orders.status, "aguardando")));
+          await reopenListingsWithoutActiveOrders(db, orderRows.map((o: any) => o.listingId));
           throw new TRPCError({
             code: "BAD_REQUEST",
             message: `Pagamento recusado: ${result.statusDetail || "Verifique os dados do cartão."}`,
@@ -150,9 +226,8 @@ export const ordersRouter = createRouter({
       } catch (err: any) {
         if (err instanceof TRPCError) throw err;
         console.error("Erro MP Card:", err);
-        for (const orderId of input.orderIds) {
-          await db.delete(orders).where(eq(orders.id, orderId));
-        }
+        await db.update(orders).set({ status: "cancelada" }).where(and(inArray(orders.id, orderRows.map((o: any) => o.id)), eq(orders.status, "aguardando")));
+        await reopenListingsWithoutActiveOrders(db, orderRows.map((o: any) => o.listingId));
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",
           message: "Erro ao processar pagamento com cartão.",
@@ -163,6 +238,7 @@ export const ordersRouter = createRouter({
   generatePix: authedQuery
     .input(z.object({ orderId: z.number().int() }))
     .mutation(async ({ ctx, input }) => {
+      await checkRateLimit(String(ctx.user.id), { limit: 10, windowMs: 60_000, keyPrefix: "mutation:payment-pix" });
       const db = getDb();
       const [order] = await db.select().from(orders).where(and(eq(orders.id, input.orderId), eq(orders.buyerId, ctx.user.id)));
       if (!order) {
@@ -175,7 +251,7 @@ export const ordersRouter = createRouter({
       try {
         const pixData = await createPixPayment(
           order.id,
-          `Pagamento do pedido #${order.id} na ContaGamer`,
+          `Pagamento do pedido #${order.id} na NEXACCOUNT`,
           order.total,
           ctx.user.email || ""
         );
@@ -241,6 +317,7 @@ export const ordersRouter = createRouter({
   advanceStage: authedQuery
     .input(z.object({ orderId: z.number().int() }))
     .mutation(async ({ ctx, input }) => {
+      await checkRateLimit(String(ctx.user.id), { limit: 10, windowMs: 60_000, keyPrefix: "mutation:stage" });
       const db = getDb();
       const [o] = await db.select().from(orders).where(eq(orders.id, input.orderId)).limit(1);
       
@@ -252,19 +329,19 @@ export const ordersRouter = createRouter({
         throw new TRPCError({ code: "BAD_REQUEST", message: "Aguarde a confirmação do pagamento do comprador." });
       }
       
-      // Vendedor só pode avançar até o estágio 3 ("Em inspeção").
-      // O estágio 4 ("Concluído") é reservado exclusivamente para o confirmReceipt do comprador.
-      if (o.stage >= 3) return { stage: o.stage };
-      
-      const stage = o.stage + 1;
-      const status = stage === 3 ? "inspecao" : "aguardando";
-      await db.update(orders).set({ stage, status }).where(eq(orders.id, o.id));
+      // A entrega real, que libera a confirmação do comprador, acontece em
+      // deliverAccount. Não avance para um status intermediário inexistente.
+      if (o.stage >= 2) return { stage: o.stage };
+
+      const stage = 2;
+      await db.update(orders).set({ stage, status: "pago" }).where(eq(orders.id, o.id));
       return { stage };
     }),
 
   deliverAccount: authedQuery
     .input(z.object({ orderId: z.number().int(), data: z.string().min(1) }))
     .mutation(async ({ ctx, input }) => {
+      await checkRateLimit(String(ctx.user.id), { limit: 10, windowMs: 60_000, keyPrefix: "mutation:deliver-account" });
       const db = getDb();
       const [o] = await db.select().from(orders).where(eq(orders.id, input.orderId)).limit(1);
       if (!o || o.sellerId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN" });
@@ -313,66 +390,98 @@ export const ordersRouter = createRouter({
   confirmReceipt: authedQuery
     .input(z.object({ orderId: z.number().int() }))
     .mutation(async ({ ctx, input }) => {
+      await checkRateLimit(String(ctx.user.id), { limit: 5, windowMs: 60_000, keyPrefix: "mutation:confirm-receipt" });
       const db = getDb();
       const [o] = await db.select().from(orders).where(eq(orders.id, input.orderId)).limit(1);
       if (!o || o.buyerId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN" });
-      if (o.status !== "entregue") {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Pedido não está entregue." });
+      if (o.status !== "entregue" || o.stage < 3) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Pedido ainda não foi entregue." });
+      }
+
+      // Evita confirmar pedidos antigos que chegaram à etapa 3 sem credenciais.
+      const [credential] = await db
+        .select({ id: orderCredentials.id })
+        .from(orderCredentials)
+        .where(eq(orderCredentials.orderId, o.id))
+        .limit(1);
+      if (!credential) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "O vendedor ainda não entregou os dados da conta." });
       }
       
       const now = new Date();
       // O valor vai para pendingBalance do vendedor (menos a taxa)
-      const sellerNet = Math.round((o.total * (100 - PLATFORM_FEE_PCT)) / 100);
+      const sellerNet = Math.max(0, o.price - o.fee);
       
-      await db.update(orders).set({ stage: 4, status: "confirmado", completedAt: now }).where(eq(orders.id, o.id));
-      await db.update(users).set({ 
-        sellerSales: sql`${users.sellerSales} + 1`,
-        pendingBalance: sql`${users.pendingBalance} + ${sellerNet}`
-      }).where(eq(users.id, o.sellerId));
+      db.transaction((tx: any) => {
+        // A condição no UPDATE impede duplo crédito em requisições concorrentes.
+        const updated = tx.update(orders)
+          .set({ stage: 4, status: "confirmado", completedAt: now })
+          .where(and(eq(orders.id, o.id), eq(orders.status, "entregue")))
+          .run();
+        if (!updated.changes) {
+          throw new TRPCError({ code: "CONFLICT", message: "Este pedido já foi confirmado." });
+        }
+        tx.update(users).set({
+          sellerSales: sql`${users.sellerSales} + 1`,
+          completedSalesCount: sql`${users.completedSalesCount} + 1`,
+          pendingBalance: sql`${users.pendingBalance} + ${sellerNet}`
+        }).where(eq(users.id, o.sellerId)).run();
+
+        // NEX Coins: cashback de 3% ao comprador (anti-fraude, apenas na confirmação)
+        const coinsEarned = Math.floor((o.total || o.price) * 0.03);
+        if (coinsEarned > 0) {
+          tx.update(users).set({
+            coins: sql`${users.coins} + ${coinsEarned}`
+          }).where(eq(users.id, o.buyerId)).run();
+          tx.insert(transactions).values({
+            userId: o.buyerId,
+            type: "coins",
+            amount: coinsEarned,
+            description: `NEX Coins de recompensa do pedido #GX-${4000 + o.id}`,
+            orderId: o.id,
+          }).run();
+        }
+      });
       
-      const unlock = new Date(now.getTime() + PAYOUT_HOLD_DAYS * 24 * 60 * 60 * 1000);
-      await notify(o.sellerId, "💸", `Comprador confirmou o recebimento do pedido #GX-${4000 + o.id}! O valor fica disponível para saque em ${PAYOUT_HOLD_DAYS} dias (${unlock.toLocaleDateString("pt-BR")}).`);
+      const unlock = o.escrowReleaseDate ?? new Date(now.getTime() + PAYOUT_HOLD_DAYS * 24 * 60 * 60 * 1000);
+      const unlockDays = o.escrowReleaseDays ?? PAYOUT_HOLD_DAYS;
+      await notify(o.sellerId, "💸", `Comprador confirmou o recebimento do pedido #GX-${4000 + o.id}! O valor fica disponível para saque em ${unlockDays} dias (${unlock.toLocaleDateString("pt-BR")}).`);
       return { success: true };
     }),
 
   processEscrowReleases: authedQuery.mutation(async ({ ctx }) => {
     if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN" });
-    const db = getDb();
-    
-    // Find all 'confirmado' orders where completedAt is more than 20 days ago
-    const holdMs = PAYOUT_HOLD_DAYS * 24 * 60 * 60 * 1000;
-    const thresholdDate = new Date(Date.now() - holdMs);
-    
-    const pendingOrders = await db.select().from(orders).where(
-      and(eq(orders.status, "confirmado"), lte(orders.completedAt, thresholdDate))
-    );
-    
-    let processed = 0;
-    for (const o of pendingOrders) {
-      const sellerNet = Math.round((o.total * (100 - PLATFORM_FEE_PCT)) / 100);
-      const now = new Date();
-      
-      await db.transaction(async (tx) => {
-        await tx.update(orders).set({ status: "concluido", fundsReleasedAt: now }).where(eq(orders.id, o.id));
-        await tx.update(users).set({
-          pendingBalance: sql`${users.pendingBalance} - ${sellerNet}`,
-          balance: sql`${users.balance} + ${sellerNet}`,
-        }).where(eq(users.id, o.sellerId));
-      });
-      await notify(o.sellerId, "💰", `O saldo do pedido #GX-${4000 + o.id} foi liberado e está disponível para saque!`);
-      processed++;
-    }
-    
-    return { success: true, processed };
+    const result = await runEscrowReleaseJob("admin-manual");
+    return { success: true, ...result };
   }),
 
   openDispute: authedQuery
     .input(z.object({ orderId: z.number().int(), reason: z.string().min(10) }))
     .mutation(async ({ ctx, input }) => {
+      await checkRateLimit(String(ctx.user.id), { limit: 5, windowMs: 60_000, keyPrefix: "mutation:dispute" });
       const db = getDb();
       const [o] = await db.select().from(orders).where(eq(orders.id, input.orderId)).limit(1);
       if (!o || o.buyerId !== ctx.user.id) throw new TRPCError({ code: "FORBIDDEN" });
-      await db.update(orders).set({ status: "disputa", disputeReason: input.reason }).where(eq(orders.id, o.id));
+      // Permite disputa se entregue, ou se pago há mais de 72h sem entrega
+      if (o.status === "entregue") {
+        // OK — fluxo normal
+      } else if (o.status === "pago") {
+        const hoursSincePayment = (Date.now() - new Date(o.createdAt).getTime()) / (1000 * 60 * 60);
+        if (hoursSincePayment < 72) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: `Aguarde o vendedor entregar os dados. Se não entregar em até ${Math.ceil(72 - hoursSincePayment)}h, você poderá abrir uma disputa.`,
+          });
+        }
+      } else {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Disputas só podem ser abertas após a entrega ou após 72h do pagamento sem resposta." });
+      }
+      await db.update(orders).set({
+        status: "disputa",
+        disputeStatus: "aberta",
+        escrowStatus: "retido_disputa",
+        disputeReason: input.reason,
+      }).where(eq(orders.id, o.id));
       await notify(o.sellerId, "⚠️", `Disputa aberta no pedido #GX-${4000 + o.id}. Um mediador foi designado.`);
       await notify(ctx.user.id, "⚖️", `Sua disputa no pedido #GX-${4000 + o.id} foi registrada. Prazo médio: 48h.`);
       return { success: true };
@@ -384,18 +493,18 @@ export const ordersRouter = createRouter({
     const [me] = await db.select().from(users).where(eq(users.id, ctx.user.id));
     
     const sales = await db
-      .select({ id: orders.id, total: orders.total, createdAt: orders.createdAt, completedAt: orders.completedAt })
+      .select({ id: orders.id, price: orders.price, fee: orders.fee, total: orders.total, createdAt: orders.createdAt, completedAt: orders.completedAt })
       .from(orders)
       .where(and(eq(orders.sellerId, ctx.user.id), inArray(orders.status, ["confirmado", "concluido"])));
       
-    const net = (total: number) => Math.round((total * (100 - PLATFORM_FEE_PCT)) / 100);
-    const receita = sales.reduce((s: number, o: any) => s + net(o.total), 0);
+    const net = (price: number, fee: number) => Math.max(0, price - fee);
+    const receita = sales.reduce((s: number, o: any) => s + net(o.price, o.fee), 0);
     const holdMs = PAYOUT_HOLD_DAYS * 24 * 60 * 60 * 1000;
     
     const pending = await db.select().from(orders).where(and(eq(orders.sellerId, ctx.user.id), eq(orders.status, "confirmado")));
     const pendingMapped = pending.map((o: any) => ({
       orderId: o.id,
-      amount: net(o.total),
+      amount: net(o.price, o.fee),
       unlockAt: o.completedAt ? new Date(new Date(o.completedAt).getTime() + holdMs) : null,
     }));
     
@@ -451,6 +560,33 @@ export const ordersRouter = createRouter({
       .where(eq(favorites.userId, ctx.user.id))
       .orderBy(desc(favorites.id));
   }),
+
+  getById: authedQuery
+    .input(z.object({ orderId: z.number().int() }))
+    .query(async ({ ctx, input }) => {
+      const db = getDb();
+      const [order] = await db
+        .select({
+          order: orders,
+          listing: listings,
+          sellerName: users.name,
+          sellerId: users.id,
+        })
+        .from(orders)
+        .innerJoin(listings, eq(orders.listingId, listings.id))
+        .innerJoin(users, eq(orders.sellerId, users.id))
+        .where(eq(orders.id, input.orderId))
+        .limit(1);
+      
+      if (!order) throw new TRPCError({ code: "NOT_FOUND", message: "Pedido não encontrado." });
+      
+      // Verificar permissão: apenas buyer, seller ou admin podem ver
+      if (order.order.buyerId !== ctx.user.id && order.order.sellerId !== ctx.user.id && ctx.user.role !== "admin") {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Você não tem permissão para ver este pedido." });
+      }
+      
+      return order;
+    }),
 
   favoritesIds: authedQuery.query(async ({ ctx }) => {
     const db = getDb();
